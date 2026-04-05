@@ -3,7 +3,6 @@ set -e
 
 cd /app
 if [ -f .venv/bin/activate ]; then
-  # shellcheck source=/dev/null
   source .venv/bin/activate
 fi
 
@@ -15,7 +14,7 @@ import sys
 import time
 from cassandra.cluster import Cluster
 
-max_retries = 60  # 5 minutes
+max_retries = 60
 retry_count = 0
 
 print("Attempting to connect to Cassandra...")
@@ -24,29 +23,23 @@ while retry_count < max_retries:
     try:
         cluster = Cluster(['cassandra-server'])
         session = cluster.connect()
-        print("✓ Cassandra is ready!")
+        print("Cassandra is ready!")
         cluster.shutdown()
         sys.exit(0)
     except Exception as e:
         retry_count += 1
         if retry_count % 6 == 0:
             elapsed = retry_count * 5
-            print(f"Still waiting... ({elapsed}s elapsed)")
+            print(f"Still waiting... ({elapsed}s elapsed): {e}")
         time.sleep(5)
 
 print("ERROR: Cassandra did not become ready after 5 minutes!")
 sys.exit(1)
 PYTHON_WAIT
 
-if [ $? -ne 0 ]; then
-    echo "Failed to connect to Cassandra!"
-    exit 1
-fi
-
 echo ""
 echo "Creating Cassandra tables..."
 
-# Create tables using Python
 python3 - <<'PYTHON_CREATE'
 from cassandra.cluster import Cluster
 
@@ -67,17 +60,17 @@ with open('/app/create_tables.cql', 'r') as f:
 statements = [s.strip() for s in cql_content.split(';') if s.strip()]
 
 for statement in statements:
-    preview = statement.replace('\n', ' ')[:60]
+    preview = statement.replace('\n', ' ')[:80]
     print(f"Executing: {preview}...")
     session.execute(statement)
 
-print("✓ Tables created successfully!")
+print("Tables created successfully!")
 cluster.shutdown()
 PYTHON_CREATE
 
 echo ""
-echo "Loading index data..."
+echo "Loading index data into Cassandra..."
 python3 /app/app.py
 
 echo ""
-echo "✓ Index data stored successfully in Cassandra!"
+echo "Index data stored successfully in Cassandra!"

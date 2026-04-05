@@ -1,31 +1,39 @@
 #!/bin/bash
-# Start ssh server
-service ssh restart 
+set -e
 
-# Starting the services
-bash start-services.sh
+# Start SSH server (required for Hadoop to communicate between nodes)
+service ssh restart
 
-if [ ! -d .venv ]; then
-  python3 -m venv .venv
+# Start Hadoop and YARN services
+bash /app/start-services.sh
+
+# Set up Python virtual environment
+if [ ! -d /app/.venv ]; then
+  python3 -m venv /app/.venv
 fi
-source .venv/bin/activate
+source /app/.venv/bin/activate
+
 pip install -q --upgrade pip
-pip install -q -r requirements.txt
+pip install -q -r /app/requirements.txt
 
-rm -f .venv.tar.gz
-venv-pack -o .venv.tar.gz
+# Pack the venv for distribution to YARN executors
+rm -f /app/.venv.tar.gz
+venv-pack -o /app/.venv.tar.gz
 
-# Collect data
+# Prepare data: read parquet, create documents, upload to HDFS
 echo "Preparing data..."
-bash prepare_data.sh
+bash /app/prepare_data.sh
 
-# Run the indexer
+# Build the index with MapReduce and load into Cassandra
 echo "Creating index..."
-bash index.sh
+bash /app/index.sh
 
-# Run a sample query
+# Run sample queries
 echo ""
-echo "Running sample search..."
-bash search.sh "computer science"
+echo "Running sample searches..."
+bash /app/search.sh "computer science"
+echo ""
+bash /app/search.sh "history of art"
 
+# Keep container running
 tail -f /dev/null

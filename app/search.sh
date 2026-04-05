@@ -10,7 +10,6 @@ fi
 QUERY="$1"
 
 if [ -f .venv/bin/activate ]; then
-  # shellcheck source=/dev/null
   source .venv/bin/activate
 fi
 
@@ -24,26 +23,29 @@ fi
 
 export PYSPARK_DRIVER_PYTHON="$DRIVER_PY"
 export PYSPARK_PYTHON="$DRIVER_PY"
+export SEARCH_QUERY="$QUERY"
 
 echo "Query: $QUERY"
 echo ""
 
-# YARN driver often does not get stdin; pass via env. query.py also accepts stdin/argv.
-export SEARCH_QUERY="$QUERY"
-
 spark-submit \
     --master yarn \
     --deploy-mode client \
-    --driver-memory 384m \
-    --executor-memory 256m \
+    --driver-memory 512m \
+    --executor-memory 512m \
     --executor-cores 1 \
-    --num-executors 1 \
-    --conf spark.driver.memoryOverhead=128 \
-    --conf spark.executor.memoryOverhead=128 \
-    --conf spark.yarn.am.memory=256m \
-    --conf spark.yarn.am.memoryOverhead=128 \
-    --conf spark.yarn.am.waitTime=600s \
-    --conf spark.network.timeout=600s \
-    --conf spark.yarn.appMasterEnv.PYSPARK_PYTHON="$DRIVER_PY" \
-    --conf spark.executorEnv.PYSPARK_PYTHON="$DRIVER_PY" \
+    --num-executors 2 \
+    --conf spark.driver.memoryOverhead=256 \
+    --conf spark.executor.memoryOverhead=256 \
+    --conf spark.yarn.am.memory=512m \
+    --conf spark.yarn.am.memoryOverhead=256 \
+    --conf spark.yarn.am.waitTime=300s \
+    --conf spark.network.timeout=300s \
+    --conf spark.executor.heartbeatInterval=60s \
+    --conf spark.sql.shuffle.partitions=2 \
+    --conf "spark.yarn.appMasterEnv.PYSPARK_PYTHON=$DRIVER_PY" \
+    --conf "spark.executorEnv.PYSPARK_PYTHON=$DRIVER_PY" \
+    --conf "spark.yarn.appMasterEnv.SEARCH_QUERY=$QUERY" \
+    --conf "spark.executorEnv.SEARCH_QUERY=$QUERY" \
+    --archives /app/.venv.tar.gz#environment \
     /app/query.py

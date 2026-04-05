@@ -18,23 +18,32 @@ def tokenize(text):
 
 
 def read_query():
-    if not sys.stdin.isatty():
-        q = sys.stdin.read().strip()
-        if q:
-            return q
+    # First priority: environment variable (set by search.sh)
     q = os.environ.get("SEARCH_QUERY", "").strip()
     if q:
         return q
+    # Second priority: command-line arguments
     if len(sys.argv) > 1:
         return " ".join(sys.argv[1:]).strip()
+    # Last resort: stdin (only if data is actually available, with timeout guard)
+    try:
+        import select
+        if select.select([sys.stdin], [], [], 2)[0]:
+            q = sys.stdin.read().strip()
+            if q:
+                return q
+    except Exception:
+        pass
     return ""
 
 
 def main():
     query_text = read_query()
     if not query_text:
-        print("ERROR: No query (stdin or argv).", file=sys.stderr)
+        print("ERROR: No query provided. Set SEARCH_QUERY env var or pass as argument.", file=sys.stderr)
         sys.exit(1)
+
+    print(f"Processing query: {query_text}", file=sys.stderr)
 
     conf = SparkConf().setAppName("BM25_Query")
     sc = SparkContext(conf=conf)
@@ -44,30 +53,36 @@ def main():
 
         query_terms = tokenize(query_text)
         if not query_terms:
-            print("No valid query terms.")
+            print("No valid query terms after tokenization.")
             return
+
+        print(f"Query terms: {query_terms}", file=sys.stderr)
 
         cluster_cs = Cluster(["cassandra-server"])
         session = cluster_cs.connect("search_engine")
 
+        # Fetch document stats
         stats_rows = list(
             session.execute(
                 "SELECT doc_id, doc_title, doc_length FROM document_stats"
             )
         )
         if not stats_rows:
-            print("Index empty (document_stats).")
+            print("Index is empty (no rows in document_stats).")
             cluster_cs.shutdown()
             return
 
         n_docs = len(stats_rows)
         total_len = sum(int(r.doc_length) for r in stats_rows)
-        avg_doc_length = total_len / n_docs if n_docs else 0.0
+        avg_doc_length = total_len / n_docs if n_docs else 1.0
         doc_stats = {
             r.doc_id: {"title": r.doc_title, "length": int(r.doc_length)}
             for r in stats_rows
         }
 
+        print(f"Corpus: {n_docs} docs, avg_len={avg_doc_length:.1f}", file=sys.stderr)
+
+        # Fetch IDF data for query terms
         term_data = {}
         for term in set(query_terms):
             rows = list(
@@ -75,27 +90,35 @@ def main():
                     "SELECT term, df FROM vocabulary WHERE term = %s", (term,)
                 )
             )
-            if not rows:
+            if not rows or rows[0].df <= 0:
                 continue
             df = rows[0].df
-            if df <= 0:
-                continue
             term_data[term] = {"df": df, "idf": math.log(n_docs / df)}
 
         if not term_data:
-            print("No query terms in vocabulary.")
+            print("None of the query terms were found in the vocabulary.")
             cluster_cs.shutdown()
             return
 
+        print(f"Matched terms: {list(term_data.keys())}", file=sys.stderr)
+
+        # Fetch postings for matched terms
         index_entries = []
         for term in term_data:
             for row in session.execute(
                 "SELECT doc_id, tf FROM inverted_index WHERE term = %s", (term,)
             ):
-                index_entries.append((row.doc_id, term, row.tf))
+                index_entries.append((row.doc_id, term, int(row.tf)))
 
         cluster_cs.shutdown()
 
+        if not index_entries:
+            print("No index entries found for query terms.")
+            return
+
+        print(f"Total postings fetched: {len(index_entries)}", file=sys.stderr)
+
+        # Broadcast lookup tables
         term_bc = sc.broadcast(term_data)
         doc_bc = sc.broadcast(doc_stats)
         avg_bc = sc.broadcast(avg_doc_length)
@@ -120,21 +143,22 @@ def main():
             .takeOrdered(10, key=lambda x: -x[1])
         )
 
-        # Required output: document ids and titles (top 10 BM25)
-        print("Top 10 (doc_id, title):")
-        for rank, (doc_id, _score) in enumerate(top, 1):
+        print("\nTop 10 results (doc_id, title):")
+        for rank, (doc_id, score) in enumerate(top, 1):
             info = doc_bc.value.get(doc_id, {})
             title = info.get("title", "")
             print(f"{rank}\t{doc_id}\t{title}")
 
     except Exception as e:
-        print("ERROR:", e, file=sys.stderr)
+        print(f"ERROR in BM25 query: {e}", file=sys.stderr)
         import traceback
-
-        traceback.print_exc()
+        traceback.print_exc(file=sys.stderr)
         sys.exit(1)
     finally:
-        sc.stop()
+        try:
+            sc.stop()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
