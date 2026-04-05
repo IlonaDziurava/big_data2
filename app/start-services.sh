@@ -1,5 +1,4 @@
 #!/bin/bash
-# This will run only by the master node
 
 # starting HDFS daemons
 $HADOOP_HOME/sbin/start-dfs.sh

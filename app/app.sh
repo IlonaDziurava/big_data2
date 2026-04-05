@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Start SSH (needed for Hadoop cluster communication)
+# Start SSH
 service ssh restart
 
 # Start HDFS, YARN, history server
@@ -16,7 +16,7 @@ source /app/.venv/bin/activate
 pip install -q --upgrade pip
 pip install -q -r /app/requirements.txt
 
-# Pack venv (needed for YARN distributed mode if used)
+# Pack venv
 rm -f /app/.venv.tar.gz
 venv-pack -o /app/.venv.tar.gz 2>/dev/null || echo "venv-pack warning (non-fatal)"
 

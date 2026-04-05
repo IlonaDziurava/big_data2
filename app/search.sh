@@ -28,8 +28,6 @@ export SEARCH_QUERY="$QUERY"
 echo "Query: $QUERY"
 echo ""
 
-# query.py sets master=local[*] internally so spark-submit just launches it.
-# We still use spark-submit as required by the assignment.
 spark-submit \
     --master local[*] \
     --driver-memory 512m \

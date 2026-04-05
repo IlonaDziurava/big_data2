@@ -48,7 +48,7 @@ def main():
 
     print(f"Query: '{query_text}'", file=sys.stderr)
 
-    # Use local mode - reliable, no YARN needed, still uses Spark RDD API
+    # Use local mode
     conf = (SparkConf()
             .setAppName("BM25_Query")
             .setMaster("local[*]"))
