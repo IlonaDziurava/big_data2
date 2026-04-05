@@ -1,6 +1,5 @@
 <?xml version="1.0"?>
 <configuration>
-  <!-- Base config from firasj/spark-docker-cluster image -->
   <property>
     <name>yarn.nodemanager.aux-services</name>
     <value>mapreduce_shuffle</value>
@@ -49,11 +48,9 @@
     <name>yarn.resourcemanager.proxy-user-privileges.enabled</name>
     <value>true</value>
   </property>
-
-  <!-- Docker / Mac: cap NM resources so containers can actually start (avoid AM launch timeout) -->
   <property>
     <name>yarn.nodemanager.resource.memory-mb</name>
-    <value>1536</value>
+    <value>2048</value>
   </property>
   <property>
     <name>yarn.nodemanager.resource.cpu-vcores</name>
@@ -65,6 +62,6 @@
   </property>
   <property>
     <name>yarn.scheduler.maximum-allocation-mb</name>
-    <value>1536</value>
+    <value>2048</value>
   </property>
 </configuration>

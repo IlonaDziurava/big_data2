@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# BM25 search: Cassandra index + PySpark RDD scoring (assignment formula).
+"""
+BM25 search engine query.
+Runs Spark in local mode to avoid YARN memory issues in Docker.
+All Cassandra access is in the driver process only.
+"""
 import math
 import os
 import re
@@ -7,7 +11,6 @@ import sys
 
 from pyspark import SparkConf, SparkContext
 
-# Assignment: k1=1, b=0.75; IDF = log(N/df)
 K1 = 1.0
 B = 0.75
 
@@ -18,17 +21,17 @@ def tokenize(text):
 
 
 def read_query():
-    # First priority: environment variable (set by search.sh)
+    # 1. env var (set by search.sh)
     q = os.environ.get("SEARCH_QUERY", "").strip()
     if q:
         return q
-    # Second priority: command-line arguments
+    # 2. command line args
     if len(sys.argv) > 1:
         return " ".join(sys.argv[1:]).strip()
-    # Last resort: stdin (only if data is actually available, with timeout guard)
+    # 3. stdin with timeout
     try:
         import select
-        if select.select([sys.stdin], [], [], 2)[0]:
+        if select.select([sys.stdin], [], [], 3)[0]:
             q = sys.stdin.read().strip()
             if q:
                 return q
@@ -40,118 +43,114 @@ def read_query():
 def main():
     query_text = read_query()
     if not query_text:
-        print("ERROR: No query provided. Set SEARCH_QUERY env var or pass as argument.", file=sys.stderr)
+        print("ERROR: no query provided. Set SEARCH_QUERY env var.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Processing query: {query_text}", file=sys.stderr)
+    print(f"Query: '{query_text}'", file=sys.stderr)
 
-    conf = SparkConf().setAppName("BM25_Query")
+    # Use local mode - reliable, no YARN needed, still uses Spark RDD API
+    conf = (SparkConf()
+            .setAppName("BM25_Query")
+            .setMaster("local[*]"))
     sc = SparkContext(conf=conf)
+    sc.setLogLevel("ERROR")
 
     try:
         from cassandra.cluster import Cluster
 
-        query_terms = tokenize(query_text)
-        if not query_terms:
-            print("No valid query terms after tokenization.")
+        terms = tokenize(query_text)
+        if not terms:
+            print("No valid query terms after tokenisation.")
             return
+        print(f"Terms: {terms}", file=sys.stderr)
 
-        print(f"Query terms: {query_terms}", file=sys.stderr)
+        cs = Cluster(["cassandra-server"])
+        s = cs.connect("search_engine")
 
-        cluster_cs = Cluster(["cassandra-server"])
-        session = cluster_cs.connect("search_engine")
-
-        # Fetch document stats
-        stats_rows = list(
-            session.execute(
-                "SELECT doc_id, doc_title, doc_length FROM document_stats"
-            )
-        )
+        # Fetch all document stats
+        stats_rows = list(s.execute(
+            "SELECT doc_id, doc_title, doc_length FROM document_stats"
+        ))
         if not stats_rows:
-            print("Index is empty (no rows in document_stats).")
-            cluster_cs.shutdown()
+            print("Index is empty — run index.sh first.")
+            cs.shutdown()
             return
 
         n_docs = len(stats_rows)
-        total_len = sum(int(r.doc_length) for r in stats_rows)
-        avg_doc_length = total_len / n_docs if n_docs else 1.0
+        avg_dl = sum(int(r.doc_length) for r in stats_rows) / n_docs
         doc_stats = {
             r.doc_id: {"title": r.doc_title, "length": int(r.doc_length)}
             for r in stats_rows
         }
+        print(f"Corpus: {n_docs} docs, avg_length={avg_dl:.1f}", file=sys.stderr)
 
-        print(f"Corpus: {n_docs} docs, avg_len={avg_doc_length:.1f}", file=sys.stderr)
-
-        # Fetch IDF data for query terms
+        # Fetch IDF for each query term
         term_data = {}
-        for term in set(query_terms):
-            rows = list(
-                session.execute(
-                    "SELECT term, df FROM vocabulary WHERE term = %s", (term,)
-                )
-            )
-            if not rows or rows[0].df <= 0:
-                continue
-            df = rows[0].df
-            term_data[term] = {"df": df, "idf": math.log(n_docs / df)}
+        for t in set(terms):
+            rows = list(s.execute(
+                "SELECT df FROM vocabulary WHERE term = %s", (t,)
+            ))
+            if rows and rows[0].df > 0:
+                df = rows[0].df
+                term_data[t] = {"df": df, "idf": math.log(n_docs / df)}
 
         if not term_data:
-            print("None of the query terms were found in the vocabulary.")
-            cluster_cs.shutdown()
+            print("No query terms found in the vocabulary.")
+            cs.shutdown()
             return
-
         print(f"Matched terms: {list(term_data.keys())}", file=sys.stderr)
 
         # Fetch postings for matched terms
-        index_entries = []
-        for term in term_data:
-            for row in session.execute(
-                "SELECT doc_id, tf FROM inverted_index WHERE term = %s", (term,)
+        postings = []
+        for t in term_data:
+            for row in s.execute(
+                "SELECT doc_id, tf FROM inverted_index WHERE term = %s", (t,)
             ):
-                index_entries.append((row.doc_id, term, int(row.tf)))
+                postings.append((row.doc_id, t, int(row.tf)))
 
-        cluster_cs.shutdown()
+        cs.shutdown()
 
-        if not index_entries:
-            print("No index entries found for query terms.")
+        if not postings:
+            print("No postings found for query terms.")
             return
+        print(f"Postings: {len(postings)}", file=sys.stderr)
 
-        print(f"Total postings fetched: {len(index_entries)}", file=sys.stderr)
-
-        # Broadcast lookup tables
+        # Distribute to Spark workers via broadcast
         term_bc = sc.broadcast(term_data)
         doc_bc = sc.broadcast(doc_stats)
-        avg_bc = sc.broadcast(avg_doc_length)
+        avg_bc = sc.broadcast(avg_dl)
 
-        def score_one(entry):
+        def score_entry(entry):
+            """Pure BM25 scoring - no imports needed on workers."""
             doc_id, term, tf = entry
-            tinfo = term_bc.value.get(term)
-            dinfo = doc_bc.value.get(doc_id)
-            if not tinfo or not dinfo:
+            ti = term_bc.value.get(term)
+            di = doc_bc.value.get(doc_id)
+            if not ti or not di:
                 return (doc_id, 0.0)
-            idf = tinfo["idf"]
-            dl = dinfo["length"]
-            avg_len = max(avg_bc.value, 1.0)
+            idf = ti["idf"]
+            dl = di["length"]
+            avg = max(avg_bc.value, 1.0)
             num = tf * (K1 + 1)
-            den = tf + K1 * (1 - B + B * (dl / avg_len))
+            den = tf + K1 * (1 - B + B * (dl / avg))
             return (doc_id, idf * (num / den))
 
-        rdd = sc.parallelize(index_entries)
-        top = (
-            rdd.map(score_one)
+        # BM25 scoring with Spark RDD
+        top10 = (
+            sc.parallelize(postings)
+            .map(score_entry)
             .reduceByKey(lambda a, b: a + b)
             .takeOrdered(10, key=lambda x: -x[1])
         )
 
         print("\nTop 10 results (doc_id, title):")
-        for rank, (doc_id, score) in enumerate(top, 1):
+        for rank, (doc_id, score) in enumerate(top10, 1):
             info = doc_bc.value.get(doc_id, {})
             title = info.get("title", "")
             print(f"{rank}\t{doc_id}\t{title}")
 
-    except Exception as e:
-        print(f"ERROR in BM25 query: {e}", file=sys.stderr)
+    except Exception as exc:
         import traceback
+        print(f"ERROR: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)
     finally:

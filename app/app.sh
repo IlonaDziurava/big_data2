@@ -1,13 +1,13 @@
 #!/bin/bash
 set -e
 
-# Start SSH server (required for Hadoop to communicate between nodes)
+# Start SSH (needed for Hadoop cluster communication)
 service ssh restart
 
-# Start Hadoop and YARN services
+# Start HDFS, YARN, history server
 bash /app/start-services.sh
 
-# Set up Python virtual environment
+# Set up Python venv
 if [ ! -d /app/.venv ]; then
   python3 -m venv /app/.venv
 fi
@@ -16,24 +16,23 @@ source /app/.venv/bin/activate
 pip install -q --upgrade pip
 pip install -q -r /app/requirements.txt
 
-# Pack the venv for distribution to YARN executors
+# Pack venv (needed for YARN distributed mode if used)
 rm -f /app/.venv.tar.gz
-venv-pack -o /app/.venv.tar.gz
+venv-pack -o /app/.venv.tar.gz 2>/dev/null || echo "venv-pack warning (non-fatal)"
 
-# Prepare data: read parquet, create documents, upload to HDFS
-echo "Preparing data..."
+echo ""
+echo "=== Step 1: Preparing data ==="
 bash /app/prepare_data.sh
 
-# Build the index with MapReduce and load into Cassandra
-echo "Creating index..."
+echo ""
+echo "=== Step 2: Building index ==="
 bash /app/index.sh
 
-# Run sample queries
 echo ""
-echo "Running sample searches..."
+echo "=== Step 3: Running sample queries ==="
 bash /app/search.sh "computer science"
 echo ""
-bash /app/search.sh "history of art"
+bash /app/search.sh "history"
 
-# Keep container running
+# Keep container alive so logs are visible
 tail -f /dev/null

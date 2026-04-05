@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Reads a.parquet from HDFS, samples 1000 documents, writes them as .txt files
-to local disk and HDFS /data, then creates /input/data (one partition) in
-tab-separated format: doc_id \t doc_title \t doc_text
+Reads a.parquet from HDFS, takes N_DOCS documents, writes them as
+<doc_id>_<doc_title>.txt to local disk and HDFS /data, then writes
+the MapReduce input to HDFS /input/data (1 partition, TSV format).
 """
 import glob
 import os
@@ -14,78 +14,90 @@ from pathvalidate import sanitize_filename
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-N_DOCS = 1000
+N_DOCS = 100
 
 spark = SparkSession.builder.appName("data_preparation").getOrCreate()
 sc = spark.sparkContext
 
-# --- Load and filter ---
+# Load parquet
 raw = spark.read.parquet("hdfs:///a.parquet").select("id", "title", "text")
 nonempty = raw.filter(
     F.col("text").isNotNull() & (F.length(F.trim(F.col("text"))) > 0)
 )
-
 total = nonempty.count()
+print(f"Total non-empty rows in parquet: {total}")
+
 if total == 0:
-    print("ERROR: No rows with non-empty text in hdfs:///a.parquet")
+    print("ERROR: no non-empty rows found in parquet!")
     spark.stop()
     raise SystemExit(1)
 
-if total >= N_DOCS:
-    df = nonempty.orderBy(F.rand(seed=42)).limit(N_DOCS)
-else:
-    df = nonempty
-    print(f"WARNING: only {total} non-empty rows found (need >= {N_DOCS}).")
+# Take up to N_DOCS rows
+sample_df = nonempty.limit(N_DOCS)
+rows = sample_df.collect()
+print(f"Collected {len(rows)} rows for indexing.")
 
-# Collect all rows to driver (we're in local mode so this is fine)
-rows = df.collect()
-print(f"Collected {len(rows)} rows.")
-
-# --- Write local .txt files ---
+# Write local .txt files  
 if os.path.isdir("data"):
     shutil.rmtree("data")
 os.makedirs("data", exist_ok=True)
 
-written = 0
 id_to_title = {}
+written = 0
 
 for row in rows:
     doc_id = str(row["id"])
     title = str(row["title"] or "").replace("\t", " ").strip()
     text = str(row["text"] or "").strip()
-
     if not text:
         continue
-
     id_to_title[doc_id] = title
-
-    safe_name = sanitize_filename(f"{doc_id}_{title}").replace(" ", "_")
-    path = f"data/{safe_name}.txt"
-    with open(path, "w", encoding="utf-8") as f:
+    # Filename format: <doc_id>_<doc_title>.txt
+    safe = sanitize_filename(f"{doc_id}_{title}").replace(" ", "_")
+    # Truncate filename if too long
+    if len(safe) > 200:
+        safe = safe[:200]
+    filepath = f"data/{safe}.txt"
+    with open(filepath, "w", encoding="utf-8") as f:
         f.write(text)
     written += 1
 
-print(f"Wrote {written} local .txt files under data/")
+print(f"Written {written} .txt files to local data/")
 
-# --- Upload to HDFS /data ---
+if written == 0:
+    print("ERROR: no files written!")
+    spark.stop()
+    raise SystemExit(1)
+
+# Upload to HDFS /data
 subprocess.run(["hdfs", "dfs", "-rm", "-r", "-f", "/data"], check=False)
 subprocess.run(["hdfs", "dfs", "-mkdir", "-p", "/data"], check=True)
 for p in glob.glob("data/*.txt"):
-    subprocess.run(["hdfs", "dfs", "-put", "-f", p, "/data/"], check=True)
+    result = subprocess.run(
+        ["hdfs", "dfs", "-put", "-f", p, "/data/"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"Warning: failed to upload {p}: {result.stderr}")
+print(f"Uploaded files to HDFS /data")
 
-print("Uploaded .txt files to HDFS /data")
+# Verify upload
+check = subprocess.run(
+    ["hdfs", "dfs", "-count", "/data"],
+    capture_output=True, text=True
+)
+print(f"HDFS /data count: {check.stdout.strip()}")
 
-# --- Build MapReduce input: one line per doc ---
+# Build MapReduce input: one line per doc, tab-separated
 titles_bc = sc.broadcast(id_to_title)
-
 
 def parse_doc(pair):
     uri, content = pair
-    name = uri.rsplit("/", 1)[-1]
-    if not name.endswith(".txt"):
+    fname = uri.rsplit("/", 1)[-1]
+    if not fname.endswith(".txt"):
         return None
-    name = name[:-4]
-    m = re.match(r"^([^_]+)_(.+)$", name)
+    stem = fname[:-4]
+    m = re.match(r"^([^_]+)_(.+)$", stem)
     if not m:
         return None
     doc_id = m.group(1)
@@ -93,19 +105,17 @@ def parse_doc(pair):
     text = (content or "").strip()
     if not text:
         return None
-    # Tab-separated: doc_id \t doc_title \t doc_text (tabs stripped from content)
-    return (
+    # Output: doc_id \t doc_title \t doc_text  (tabs stripped from content)
+    return "\t".join([
         doc_id,
         title.replace("\t", " "),
         text.replace("\t", " "),
-    )
-
+    ])
 
 lines_rdd = (
     sc.wholeTextFiles("hdfs:///data")
     .map(parse_doc)
     .filter(lambda x: x is not None)
-    .map(lambda t: "\t".join(t))
     .coalesce(1)
 )
 
@@ -113,5 +123,13 @@ subprocess.run(["hdfs", "dfs", "-rm", "-r", "-f", "/input/data"], check=False)
 subprocess.run(["hdfs", "dfs", "-mkdir", "-p", "/input"], check=True)
 lines_rdd.saveAsTextFile("hdfs:///input/data")
 
+# Verify
+count_result = subprocess.run(
+    ["hdfs", "dfs", "-cat", "/input/data/part-00000"],
+    capture_output=True, text=True
+)
+line_count = len([l for l in count_result.stdout.strip().split("\n") if l])
+print(f"MapReduce input lines written: {line_count}")
+
 spark.stop()
-print("Done. Created hdfs:///data and hdfs:///input/data (1 partition).")
+print(f"Done. {written} documents prepared in hdfs:///input/data")

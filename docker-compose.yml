@@ -37,6 +37,7 @@ services:
       - spark-cluster
     hostname: cluster-slave-1
     tty: true
+    mem_limit: 3g
     volumes:
       - "./hadoop/workers:/usr/local/hadoop/etc/hadoop/workers:ro"
       - "./hadoop/yarn-site.xml:/usr/local/hadoop/etc/hadoop/yarn-site.xml:ro"
@@ -55,6 +56,7 @@ services:
       - spark-cluster
     hostname: cluster-slave-2
     tty: true
+    mem_limit: 3g
     volumes:
       - "./hadoop/workers:/usr/local/hadoop/etc/hadoop/workers:ro"
       - "./hadoop/yarn-site.xml:/usr/local/hadoop/etc/hadoop/yarn-site.xml:ro"
@@ -75,8 +77,8 @@ services:
     volumes:
       - ./data/cassandra:/var/lib/cassandra
     environment:
-      - CASSANDRA_MAX_HEAP_SIZE=256M
-      - CASSANDRA_HEAP_NEWSIZE=128M
+      - CASSANDRA_MAX_HEAP_SIZE=512M
+      - CASSANDRA_HEAP_NEWSIZE=256M
     healthcheck:
       test: ["CMD-SHELL", "cqlsh -e 'DESC KEYSPACES' >/dev/null 2>&1 || exit 1"]
       interval: 10s
