@@ -13,8 +13,7 @@ hdfs dfs -rm -r -f /tmp/indexer || true
 # Create output directories
 hdfs dfs -mkdir -p /indexer
 
-hdfs dfs -rm -r -f /tmp/indexer/output
-
+# Run MapReduce job
 echo "Running MapReduce indexer..."
 hadoop jar /usr/local/hadoop/share/hadoop/tools/lib/hadoop-streaming-*.jar \
     -D mapreduce.job.reduces=1 \

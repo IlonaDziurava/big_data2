@@ -1,6 +1,7 @@
 services:
   cluster-master:
     image: firasj/spark-docker-cluster
+    platform: linux/amd64
     container_name: cluster-master
     ports:
       - "8088:8088"
@@ -10,43 +11,78 @@ services:
       - "9870:9870"
     volumes:
       - "./app:/app"
+      - "./hadoop/workers:/usr/local/hadoop/etc/hadoop/workers:ro"
+      - "./hadoop/yarn-site.xml:/usr/local/hadoop/etc/hadoop/yarn-site.xml:ro"
     networks:
       - spark-cluster
     depends_on:
-      - cluster-slave-1
-      - cassandra-server
+      cluster-slave-1:
+        condition: service_healthy
+      cluster-slave-2:
+        condition: service_healthy
+      cassandra-server:
+        condition: service_healthy
     hostname: cluster-master
     tty: true
     working_dir: /app
-    # You can comment the entrypoint to run the script manually inside the container
-    entrypoint: 
+    entrypoint:
       - bash
       - /app/app.sh
-    
+
   cluster-slave-1:
     image: firasj/spark-docker-cluster
+    platform: linux/amd64
     container_name: cluster-slave-1
     networks:
       - spark-cluster
     hostname: cluster-slave-1
     tty: true
-  # cluster-slave-2:
-  #   image: firasj/spark-docker-cluster
-  #   container_name: cluster-slave-2
-  #   networks:
-  #     - spark-cluster
-  #   depends_on:
-  #     - cluster-slave-1
-  #   hostname: cluster-slave-2
-  #   tty: true
-  cassandra-server:
-    image: cassandra
-    container_name: cassandra-server
-    ports:
-      - "7000:7000"
+    volumes:
+      - "./hadoop/workers:/usr/local/hadoop/etc/hadoop/workers:ro"
+      - "./hadoop/yarn-site.xml:/usr/local/hadoop/etc/hadoop/yarn-site.xml:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -tln 2>/dev/null | grep -q ':22 '"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  cluster-slave-2:
+    image: firasj/spark-docker-cluster
+    platform: linux/amd64
+    container_name: cluster-slave-2
     networks:
       - spark-cluster
-    
+    hostname: cluster-slave-2
+    tty: true
+    volumes:
+      - "./hadoop/workers:/usr/local/hadoop/etc/hadoop/workers:ro"
+      - "./hadoop/yarn-site.xml:/usr/local/hadoop/etc/hadoop/yarn-site.xml:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -tln 2>/dev/null | grep -q ':22 '"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  cassandra-server:
+    image: cassandra:4.1
+    container_name: cassandra-server
+    ports:
+      - "9042:9042"
+    networks:
+      - spark-cluster
+    volumes:
+      - ./data/cassandra:/var/lib/cassandra
+    environment:
+      - CASSANDRA_MAX_HEAP_SIZE=256M
+      - CASSANDRA_HEAP_NEWSIZE=128M
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESC KEYSPACES' >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
 
 networks:
   spark-cluster:
