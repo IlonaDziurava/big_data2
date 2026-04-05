@@ -2,7 +2,6 @@
 *.parquet
 .venv.tar.gz
 data/cassandra/
-app/data/*.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
